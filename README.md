@@ -1,2 +1,8 @@
 # mon-cheri
-Printable knarps for brake and shift cables.
+### Printable crimps braided cable simps.
+
+*mon-cheri* are open-source, printable crimps to keep bicycle brake and shifter cable ends from fraying. They're designed to be printed in PETG or other tough filaments.
+
+An open source product from the good folx at [les original](https://www.lesoriginal.com)
+
+Say thanks on [Twitter](https://www.twitter.com/learntomakedo)
