@@ -5,4 +5,4 @@
 
 An open source product from the good folx at [les original](https://www.lesoriginal.com)
 
-Say thanks on INstagram [@lesoriginal](https://www.instagram.com/lesoriginal)
+Say thanks on Instagram [@lesoriginal](https://www.instagram.com/lesoriginal)
