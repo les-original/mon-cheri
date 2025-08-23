@@ -14,7 +14,7 @@ Each shape is provided in M3 and M4 sizes.
 
 M3 allows some shapes be a bit smaller (lighter!) but the threads are delicate, and the hex wrench size is *rare*.
 
-M4 is a more common hex wrench size to carry, and makes everythin a bit more robust.
+M4 is a more common hex wrench size to carry, and makes everything a bit more robust.
 
 Every `mon-cheri` should fit typical brake and shifter cables of all sorts.
 
