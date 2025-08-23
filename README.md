@@ -1,5 +1,5 @@
 # **mon-cheri**
-## Printable crimps braided cable simps.
+## Printable crimps for braided cable simps.
 `mon-cheri` are open-source, printed crimps to keep bicycle brake and shifter cable ends from fraying. They look neat, are easy to grip and removable for maintenaince. 
 
 ## Two screw sizes, one cable size, many shapes
