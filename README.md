@@ -22,7 +22,7 @@ Every `mon-cheri` should fit typical brake and shifter cables of all sorts.
 
 | Style  | tri      | ball     | barrel   | heart    | square   |
 |--------|----------|----------|----------|----------|----------|
-| **M3** | 4 mm     | 5 mm     | 5 mm     | 5 - 6 mm | 4 mm     |
+| **M3** | 4 mm     | 5 mm     | 5 mm     | 4 mm     | 4 mm     |
 | **M4** | 5 - 6 mm | 3.5-4 mm | 3.5-4 mm | 5 - 6 mm | 5 - 6 mm |
 
 
