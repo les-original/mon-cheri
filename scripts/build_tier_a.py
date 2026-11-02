@@ -28,6 +28,8 @@ CABLE_R = 1.0
 LIP_R = 0.175
 OUTER_R = 1.0
 CONE_H = 1.0 / math.tan(math.radians(59))
+# After the 1 mm outside fillet, the cable mouth sits this far in from the flat side (matches square-m3).
+MOUTH_INSET = 0.175
 
 KEEP = {
     "tri-m3": 287.487,
@@ -85,27 +87,58 @@ def vertical_fillet(solid, thick, radius=OUTER_R):
     return solid
 
 
-def lip_fillet(solid, cable_center, screw_center, bolt_r, zmid, mouth_x_min=0.0):
+def rot_z(v, deg):
+    t = math.radians(deg)
+    c, s = math.cos(t), math.sin(t)
+    return App.Vector(v.x * c - v.y * s, v.x * s + v.y * c, v.z)
+
+
+def outer_fillet(solid, thick, radius=OUTER_R):
+    return vertical_fillet(solid, thick, radius)
+
+
+def cable_circles_at_zmid(solid, zmid):
+    circles = []
+    for e in solid.Edges:
+        c = curve_of(e)
+        if c is None or type(c).__name__ != "Circle":
+            continue
+        if abs(c.Radius - CABLE_R) > 0.05 or abs(c.Center.z - zmid) > 0.12:
+            continue
+        circles.append(e)
+    return circles
+
+
+def lip_fillet_by_center(solid, cable_center, screw_center, bolt_r, zmid, mouth_x_min=0.0):
+    """Cable lip on curved or barrel sides (bean); picks mouth circle by position."""
     cable_e, screw_e = [], []
+    mouth_xy = App.Vector(cable_center.x, cable_center.y, 0)
     for e in solid.Edges:
         c = curve_of(e)
         if c is None or type(c).__name__ != "Circle":
             continue
         cc = c.Center
         if abs(c.Radius - CABLE_R) < 0.05 and abs(cc.z - zmid) < 0.15:
-            if cc.x >= mouth_x_min and (App.Vector(cc.x, cc.y, 0) - App.Vector(cable_center.x, cable_center.y, 0)).Length < 1.2:
+            if cc.x >= mouth_x_min and (
+                App.Vector(cc.x, cc.y, 0) - mouth_xy
+            ).Length < 1.2:
                 cable_e.append(e)
         if abs(c.Radius - bolt_r) < 0.06 and abs(cc.x - screw_center.x) < 0.2 and abs(cc.y - screw_center.y) < 0.2:
             if abs(cc.z) < 0.15 and abs(e.Length - 2 * math.pi * bolt_r) < 0.15:
                 screw_e.append(e)
+    if not cable_e:
+        mouth_pt = App.Vector(cable_center.x, cable_center.y, zmid)
+        for e in solid.Edges:
+            if e.Length < 0.25 or e.Length > 2 * math.pi * CABLE_R + 0.35:
+                continue
+            for v in e.Vertexes:
+                if (v.Point - mouth_pt).Length < 1.25:
+                    cable_e.append(e)
+                    break
     if not cable_e or len(screw_e) != 1:
         raise RuntimeError(f"lip edges cable={len(cable_e)} screw={len(screw_e)}")
     cable_e.sort(key=lambda e: -e.Length)
-    try:
-        solid = solid.makeFillet(LIP_R, screw_e)
-        solid = solid.makeFillet(LIP_R, [cable_e[0]])
-    except Exception:
-        pass
+    solid = solid.makeFillet(LIP_R, [cable_e[0], screw_e[0]])
     try:
         solid = solid.removeSplitter()
     except Exception:
@@ -113,22 +146,100 @@ def lip_fillet(solid, cable_center, screw_center, bolt_r, zmid, mouth_x_min=0.0)
     return solid
 
 
-def square_pinch(solid, thick, bolt_r, half_x, half_y=None):
-    """Cable +X face, screw down through top center (0,0). Profile centered on origin."""
-    if half_y is None:
-        half_y = half_x
-    solid = vertical_fillet(solid, thick)
+def lip_fillet(solid, bolt_r, zmid, outward):
+    """Blend the outer cable mouth and top screw opening (square-style)."""
+    outward = unit(outward)
+    cable_full = [
+        e
+        for e in cable_circles_at_zmid(solid, zmid)
+        if abs(e.Length - 2 * math.pi) < 0.12
+    ]
+    if not cable_full:
+        raise RuntimeError("no full cable mouth circle for lip")
+    cable_full.sort(
+        key=lambda e: -(
+            App.Vector(e.Curve.Center.x, e.Curve.Center.y, 0).dot(outward)
+        )
+    )
+    cable_e = cable_full[0]
+    screw_e = []
+    for e in solid.Edges:
+        c = curve_of(e)
+        if c is None or type(c).__name__ != "Circle":
+            continue
+        cc = c.Center
+        if abs(c.Radius - bolt_r) < 0.06 and abs(cc.x) < 0.2 and abs(cc.y) < 0.2:
+            if abs(cc.z) < 0.15 and abs(e.Length - 2 * math.pi * bolt_r) < 0.15:
+                screw_e.append(e)
+    if len(screw_e) != 1:
+        raise RuntimeError(f"screw lip edges {len(screw_e)}")
+    solid = solid.makeFillet(LIP_R, [cable_e, screw_e[0]])
+    try:
+        solid = solid.removeSplitter()
+    except Exception:
+        pass
+    return solid
+
+
+def positive_x_mouth_on_solid(solid, zmid, inset=MOUTH_INSET, prefer_flat_center=True):
+    """Outermost +X cable mouth on the zmid slice (after outer fillet), inset for lip."""
+    plane = Part.makePlane(30, 30, App.Vector(-15, -15, zmid), App.Vector(0, 0, 1))
+    sec = solid.section(plane)
+    verts = [v for v in sec.Vertexes if v.X > 0]
+    if not verts:
+        raise RuntimeError("no +X profile on solid slice")
+    if prefer_flat_center:
+        max_x = max(v.X for v in verts)
+        band = [v for v in verts if v.X >= max_x - 0.35]
+        band.sort(key=lambda v: (abs(v.Y), -v.X))
+        v = band[0]
+    else:
+        v = max(verts, key=lambda v: v.X)
+    return App.Vector(v.X - inset, v.Y, zmid)
+
+
+def side_top_pinch(
+    solid,
+    thick,
+    bolt_r,
+    face_x=6.0,
+    face_y=0.0,
+    tilt_deg=0.0,
+    verify=True,
+    mouth_override=None,
+    already_filleted=False,
+):
+    """Square-style: cable into +X side face, screw down through top center."""
+    if not already_filleted:
+        solid = outer_fillet(solid, thick)
     zmid = -thick / 2.0
     screw_depth = thick - 1.0
-    cable_center = App.Vector(half_x, 0, zmid)
-    dist = half_x
+    if mouth_override is not None:
+        mouth = App.Vector(mouth_override.x, mouth_override.y, zmid)
+        inward = App.Vector(-1, 0, 0)
+        if abs(tilt_deg) > 0.01:
+            inward = rot_z(inward, tilt_deg)
+        inward = unit(inward)
+        outward = inward * -1
+    else:
+        mouth_xy = App.Vector(face_x - MOUTH_INSET, face_y, 0)
+        inward = App.Vector(-1, 0, 0)
+        if abs(tilt_deg) > 0.01:
+            mouth_xy = rot_z(mouth_xy, tilt_deg)
+            inward = rot_z(inward, tilt_deg)
+        inward = unit(inward)
+        outward = inward * -1
+        mouth = App.Vector(mouth_xy.x, mouth_xy.y, zmid)
+    dist = (mouth - App.Vector(0, 0, zmid)).dot(outward)
+    if dist < 2.5:
+        raise RuntimeError(f"cable side too shallow {dist:.2f}")
     cable_depth = dist + bolt_r + 0.45
     if cable_depth + CONE_H > 2 * dist - 1.0:
-        raise RuntimeError("cable breaks out (square pinch)")
-    start = App.Vector(half_x, 0, zmid) - App.Vector(1, 0, 0) * 0.25
-    solid = solid.cut(Part.makeCylinder(CABLE_R, cable_depth + 0.25, start, App.Vector(-1, 0, 0)))
-    cone_at = App.Vector(half_x, 0, zmid) + App.Vector(-1, 0, 0) * cable_depth
-    solid = solid.cut(Part.makeCone(CABLE_R, 0.0, CONE_H, cone_at, App.Vector(-1, 0, 0)))
+        raise RuntimeError("cable would break out the far side")
+    start = mouth - inward * 0.25
+    solid = solid.cut(Part.makeCylinder(CABLE_R, cable_depth + 0.25, start, inward))
+    cone_at = mouth + inward * cable_depth
+    solid = solid.cut(Part.makeCone(CABLE_R, 0.0, CONE_H, cone_at, inward))
     solid = solid.cut(
         Part.makeCylinder(
             bolt_r,
@@ -137,20 +248,24 @@ def square_pinch(solid, thick, bolt_r, half_x, half_y=None):
             App.Vector(0, 0, -1),
         )
     )
-    solid = lip_fillet(
-        solid,
-        cable_center,
-        App.Vector(0, 0, 0),
-        bolt_r,
-        zmid,
-        mouth_x_min=half_x - 1.5,
-    )
-    return solid, cable_center, screw_depth
+    if verify:
+        solid = lip_fillet(solid, bolt_r, zmid, outward)
+        verify_cable_mouth(solid, zmid, outward, mouth)
+    else:
+        solid = lip_fillet_by_center(
+            solid,
+            mouth,
+            App.Vector(0, 0, 0),
+            bolt_r,
+            zmid,
+            mouth_x_min=mouth.x - 1.5,
+        )
+    return solid, mouth, screw_depth
 
 
 def barrel_pinch(solid, thick, bolt_r, surface_x, surface_y=0.0):
-    """Cable enters +X side at (surface_x, surface_y), screw through top center."""
-    solid = vertical_fillet(solid, thick)
+    """Bean / curved +X entry — no flat-face mouth verify."""
+    solid = outer_fillet(solid, thick)
     zmid = -thick / 2.0
     screw_depth = thick - 1.0
     cable_center = App.Vector(surface_x, surface_y, zmid)
@@ -170,7 +285,7 @@ def barrel_pinch(solid, thick, bolt_r, surface_x, surface_y=0.0):
             App.Vector(0, 0, -1),
         )
     )
-    solid = lip_fillet(
+    solid = lip_fillet_by_center(
         solid,
         cable_center,
         App.Vector(0, 0, 0),
@@ -181,17 +296,68 @@ def barrel_pinch(solid, thick, bolt_r, surface_x, surface_y=0.0):
     return solid, cable_center, screw_depth
 
 
-def hex_wire(flat_to_flat=12.0):
-    a = flat_to_flat / 2.0
-    h = a * math.sqrt(3)
-    pts = [
-        App.Vector(a, 0, 0),
-        App.Vector(a / 2, h / 2, 0),
-        App.Vector(-a / 2, h / 2, 0),
-        App.Vector(-a, 0, 0),
-        App.Vector(-a / 2, -h / 2, 0),
-        App.Vector(a / 2, -h / 2, 0),
+def verify_cable_mouth(solid, zmid, outward, mouth):
+    outward = unit(outward)
+    full = [
+        e
+        for e in cable_circles_at_zmid(solid, zmid)
+        if abs(e.Length - 2 * math.pi) < 0.12
     ]
+    if not full:
+        raise RuntimeError("no full cable mouth circle")
+    best = max(
+        full,
+        key=lambda e: App.Vector(e.Curve.Center.x, e.Curve.Center.y, 0).dot(outward),
+    )
+    c = best.Curve.Center
+    if (App.Vector(c.x, c.y, 0) - App.Vector(mouth.x, mouth.y, 0)).Length > 0.3:
+        raise RuntimeError(f"cable mouth at ({c.x:.2f},{c.y:.2f}) expected near ({mouth.x:.2f},{mouth.y:.2f})")
+    for e in cable_circles_at_zmid(solid, zmid):
+        if abs(e.Length - 2 * math.pi) < 0.12:
+            continue
+        if e.Length < 0.35:
+            continue
+        cc = e.Curve.Center
+        if App.Vector(cc.x, cc.y, 0).dot(outward) > App.Vector(c.x, c.y, 0).dot(outward) - 0.5:
+            raise RuntimeError(f"split cable opening arc length {e.Length:.2f}")
+
+
+def mesh_topology_check(mesh, name):
+    from collections import defaultdict
+
+    topo = mesh.Topology
+    pts = topo[0]
+    adj = defaultdict(int)
+    for fac in topo[1]:
+        for a, b in ((fac[0], fac[1]), (fac[1], fac[2]), (fac[2], fac[0])):
+            adj[tuple(sorted((a, b)))] += 1
+    boundary = sum(1 for n in adj.values() if n != 2)
+    if boundary:
+        raise RuntimeError(f"{name} mesh has {boundary} open edges")
+    if mesh.hasNonManifolds():
+        raise RuntimeError(f"{name} non-manifold mesh")
+    if mesh.hasSelfIntersections():
+        raise RuntimeError(f"{name} self-intersecting mesh")
+
+
+def hex_wire(flat_to_flat=12.0):
+    """Regular hex with flat-to-flat = 12 mm; a flat face on +X for the cable (square-style)."""
+    a = flat_to_flat / 2.0  # apothem from origin to the +X flat
+    b = a / math.sqrt(3)  # half-length of each flat edge
+    # Build with horizontal flats, then rotate so the right flat sits on +X.
+    raw = [
+        (-b, a),
+        (b, a),
+        (2 * b, 0),
+        (b, -a),
+        (-b, -a),
+        (-2 * b, 0),
+    ]
+
+    def rot90(x, y):
+        return App.Vector(y, -x, 0)
+
+    pts = [rot90(x, y) for x, y in raw]
     segs = [Part.LineSegment(pts[i], pts[(i + 1) % 6]).toShape() for i in range(6)]
     return Part.Wire(segs)
 
@@ -220,8 +386,6 @@ def squircle_wire(size=12.0, corner_r=3.0, tilt_deg=8.0):
         ).toShape(),
     ]
     wire = Part.Wire(edges)
-    if abs(tilt_deg) > 0.01:
-        wire.rotate(App.Vector(0, 0, 0), App.Vector(0, 0, 1), tilt_deg)
     return wire
 
 
@@ -263,22 +427,30 @@ def extrude_profile(wire, thick):
 def build_hex(thick, bolt_r):
     wire = hex_wire(12.0)
     solid = extrude_profile(wire, thick)
-    return square_pinch(solid, thick, bolt_r, 6.0, 6.0 * math.sqrt(3) / 2)
+    return side_top_pinch(solid, thick, bolt_r, face_x=6.0, face_y=0.0)
 
 
 def build_squircle(thick, bolt_r):
-    wire = squircle_wire(12.0, 3.0, 8.0)
-    bb = wire.BoundBox
-    half_x = bb.XMax
+    wire = squircle_wire(12.0, 3.0, 0.0)
     solid = extrude_profile(wire, thick)
-    return square_pinch(solid, thick, bolt_r, half_x, max(abs(bb.YMin), bb.YMax))
+    solid, mouth, screw_d = side_top_pinch(solid, thick, bolt_r, face_x=6.0, face_y=0.0)
+    zmid = -thick / 2.0
+    mouth_xy = App.Vector(mouth.x, mouth.y, 0)
+    solid.rotate(App.Vector(0, 0, 0), App.Vector(0, 0, 1), 8.0)
+    mouth = rot_z(mouth_xy, 8.0)
+    mouth.z = zmid
+    return solid, mouth, screw_d
 
 
 def build_drop(thick, bolt_r):
     wire = drop_wire()
-    bb = wire.BoundBox
     solid = extrude_profile(wire, thick)
-    return square_pinch(solid, thick, bolt_r, bb.XMax, max(abs(bb.YMin), bb.YMax))
+    solid = outer_fillet(solid, thick)
+    zmid = -thick / 2.0
+    mouth_xy = positive_x_mouth_on_solid(solid, zmid, prefer_flat_center=False)
+    return side_top_pinch(
+        solid, thick, bolt_r, verify=False, mouth_override=mouth_xy, already_filleted=True
+    )
 
 
 def build_bean(thick, bolt_r):
@@ -290,23 +462,30 @@ def build_bean(thick, bolt_r):
 
 def mesh_check(solid, name):
     mesh = MeshPart.meshFromShape(Shape=solid, LinearDeflection=0.008, AngularDeflection=0.12)
-    if mesh.hasNonManifolds():
-        raise RuntimeError(f"{name} non-manifold mesh")
+    mesh_topology_check(mesh, name)
     bb = mesh.BoundBox
     log(name, "mesh", f"{bb.XLength:.2f}x{bb.YLength:.2f}x{bb.ZLength:.2f}", "ymin", round(bb.YMin, 3))
     return mesh
 
 
-def check_solid(solid, thick, bolt_r, cable_center, screw_depth, pinch):
+def check_solid(solid, thick, bolt_r, mouth, screw_depth, pinch):
     if len(solid.Solids) != 1:
         raise RuntimeError("not one solid")
     zmid = -thick / 2.0
+    if mouth.Length > 1e-6:
+        inward_xy = App.Vector(-mouth.x, -mouth.y, 0)
+        if inward_xy.Length > 1e-6:
+            inward_xy.normalize()
+        else:
+            inward_xy = App.Vector(-1, 0, 0)
+    else:
+        inward_xy = App.Vector(-1, 0, 0)
     tests = [
         (App.Vector(0, 0, zmid), False),
         (App.Vector(0, 0, -screw_depth + 0.2), False),
         (App.Vector(0, 0, -thick + 0.35), True),
         (App.Vector(0, 0, -0.35), False),
-        (cable_center + App.Vector(-0.4, 0, 0), False),
+        (App.Vector(mouth.x, mouth.y, zmid) + inward_xy * (-0.4), False),
     ]
     for p, want in tests:
         got = solid.isInside(p, 1e-5, True)
