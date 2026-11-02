@@ -238,7 +238,9 @@ def side_top_pinch(
     tilt_deg=0.0,
     verify=True,
     mouth_override=None,
+    inward_override=None,
     already_filleted=False,
+    drop_cable_lip=False,
 ):
     """Square-style: cable into +X side face, screw down through top center."""
     if not already_filleted:
@@ -247,10 +249,13 @@ def side_top_pinch(
     screw_depth = thick - 1.0
     if mouth_override is not None:
         mouth = App.Vector(mouth_override.x, mouth_override.y, zmid)
-        inward = App.Vector(-1, 0, 0)
-        if abs(tilt_deg) > 0.01:
-            inward = rot_z(inward, tilt_deg)
-        inward = unit(inward)
+        if inward_override is not None:
+            inward = unit(inward_override)
+        else:
+            inward = App.Vector(-1, 0, 0)
+            if abs(tilt_deg) > 0.01:
+                inward = rot_z(inward, tilt_deg)
+            inward = unit(inward)
         outward = inward * -1
     else:
         mouth_xy = App.Vector(face_x - MOUTH_INSET, face_y, 0)
@@ -280,8 +285,11 @@ def side_top_pinch(
         )
     )
     if verify:
-        solid = lip_fillet(solid, bolt_r, zmid, outward)
-        verify_cable_mouth(solid, zmid, outward, mouth)
+        if drop_cable_lip:
+            solid = lip_fillet_drop(solid, mouth, bolt_r, zmid)
+        else:
+            solid = lip_fillet(solid, bolt_r, zmid, outward)
+        verify_cable_mouth(solid, zmid, outward, mouth, center_tol=1.0 if drop_cable_lip else 0.3)
     elif mouth_override is not None and already_filleted:
         solid = lip_fillet_drop(solid, mouth, bolt_r, zmid)
     else:
@@ -329,7 +337,7 @@ def barrel_pinch(solid, thick, bolt_r, surface_x, surface_y=0.0):
     return solid, cable_center, screw_depth
 
 
-def verify_cable_mouth(solid, zmid, outward, mouth):
+def verify_cable_mouth(solid, zmid, outward, mouth, center_tol=0.3):
     outward = unit(outward)
     full = [
         e
@@ -343,8 +351,10 @@ def verify_cable_mouth(solid, zmid, outward, mouth):
         key=lambda e: App.Vector(e.Curve.Center.x, e.Curve.Center.y, 0).dot(outward),
     )
     c = best.Curve.Center
-    if (App.Vector(c.x, c.y, 0) - App.Vector(mouth.x, mouth.y, 0)).Length > 0.3:
-        raise RuntimeError(f"cable mouth at ({c.x:.2f},{c.y:.2f}) expected near ({mouth.x:.2f},{mouth.y:.2f})")
+    if (App.Vector(c.x, c.y, 0) - App.Vector(mouth.x, mouth.y, 0)).Length > center_tol:
+        raise RuntimeError(
+            f"cable mouth at ({c.x:.2f},{c.y:.2f}) expected near ({mouth.x:.2f},{mouth.y:.2f})"
+        )
     for e in cable_circles_at_zmid(solid, zmid):
         if abs(e.Length - 2 * math.pi) < 0.12:
             continue
@@ -477,8 +487,48 @@ def _fillet_arc(center, radius, p_from, p_to):
     return Part.ArcOfCircle(circ, a1, a2).toShape()
 
 
+def drop_left_face_geometry():
+    """Blunt left side face: inward normal and a plan point on the face mid-height."""
+    r = DROP_MAIN_R
+    sr = DROP_SHOULDER_R
+    tip_r = DROP_TIP_R
+    tip_y = DROP_TIP_Y
+    t_side = DROP_TIP_SPREAD
+    tl = -math.pi / 2 - t_side
+    pl = App.Vector(tip_r * math.cos(tl), tip_y + tip_r * math.sin(tl), 0)
+    Vl = App.Vector(-r, 0, 0)
+    _, Pll, _ = _shoulder_fillet_points(r, sr, Vl, pl - Vl, "left")
+    d = unit(pl - Pll)
+    inward = unit(App.Vector(-d.y, d.x, 0))
+    outward = inward * -1
+    face_mid = (Pll + pl) * 0.5
+    return inward, outward, face_mid
+
+
+def drop_left_face_inward():
+    """Inward normal for the blunt left side face (Pll→tip), plan view."""
+    inward, _, _ = drop_left_face_geometry()
+    return inward
+
+
+def drop_left_mouth_on_solid(solid, zmid, inward, inset=MOUTH_INSET):
+    """Cable mouth centered on the left blunt face at zmid (inset after 1 mm outer fillet)."""
+    inward = unit(inward)
+    outward = inward * -1
+    _, outward, face_mid = drop_left_face_geometry()
+    # Lip land on the left flat: inset from the filleted outer skin along the face normal.
+    mouth_xy = face_mid + outward * (OUTER_R - inset)
+    mouth = App.Vector(mouth_xy.x, mouth_xy.y, zmid)
+    # Confirm the 2 mm circle fits inside material at mid-thickness.
+    probe = mouth + inward * (CABLE_R + 0.05)
+    probe.z = zmid
+    if not solid.isInside(probe, 1e-4, True):
+        raise RuntimeError("drop left cable mouth not inside solid")
+    return mouth
+
+
 def drop_wire():
-    """Teardrop: dome on +Y, blunt tip on -Y; cable enters +X; round shoulder fillets."""
+    """Teardrop: dome on +Y, blunt tip on -Y; cable on left flat; round shoulder fillets."""
     r = DROP_MAIN_R
     sr = DROP_SHOULDER_R
     tip_r = DROP_TIP_R
@@ -543,9 +593,17 @@ def build_drop(thick, bolt_r):
     solid = extrude_profile(wire, thick)
     solid = outer_fillet(solid, thick)
     zmid = -thick / 2.0
-    mouth_xy = positive_x_mouth_on_solid(solid, zmid, prefer_flat_center=False)
+    inward = drop_left_face_inward()
+    mouth = drop_left_mouth_on_solid(solid, zmid, inward)
     return side_top_pinch(
-        solid, thick, bolt_r, verify=False, mouth_override=mouth_xy, already_filleted=True
+        solid,
+        thick,
+        bolt_r,
+        verify=True,
+        drop_cable_lip=True,
+        mouth_override=mouth,
+        inward_override=inward,
+        already_filleted=True,
     )
 
 
@@ -568,7 +626,9 @@ def check_solid(solid, thick, bolt_r, mouth, screw_depth, pinch):
     if len(solid.Solids) != 1:
         raise RuntimeError("not one solid")
     zmid = -thick / 2.0
-    if mouth.Length > 1e-6:
+    if pinch == "drop":
+        inward_xy = drop_left_face_inward()
+    elif mouth.Length > 1e-6:
         inward_xy = App.Vector(-mouth.x, -mouth.y, 0)
         if inward_xy.Length > 1e-6:
             inward_xy.normalize()
