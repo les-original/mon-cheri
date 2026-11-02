@@ -109,6 +109,27 @@ def cable_circles_at_zmid(solid, zmid):
     return circles
 
 
+def lip_fillet_drop(solid, cable_center, bolt_r, zmid):
+    """Drop: screw lip; cable mouth is a partial arc so skip cable torus (avoids bad fillets)."""
+    screw_e = []
+    for e in solid.Edges:
+        c = curve_of(e)
+        if c is None or type(c).__name__ != "Circle":
+            continue
+        cc = c.Center
+        if abs(c.Radius - bolt_r) < 0.06 and abs(cc.x) < 0.2 and abs(cc.y) < 0.2:
+            if abs(cc.z) < 0.15 and abs(e.Length - 2 * math.pi * bolt_r) < 0.15:
+                screw_e.append(e)
+    if len(screw_e) != 1:
+        raise RuntimeError(f"drop screw lip edges {len(screw_e)}")
+    solid = solid.makeFillet(LIP_R, screw_e)
+    try:
+        solid = solid.removeSplitter()
+    except Exception:
+        pass
+    return solid
+
+
 def lip_fillet_by_center(solid, cable_center, screw_center, bolt_r, zmid, mouth_x_min=0.0):
     """Cable lip on curved or barrel sides (bean); picks mouth circle by position."""
     cable_e, screw_e = [], []
@@ -127,18 +148,28 @@ def lip_fillet_by_center(solid, cable_center, screw_center, bolt_r, zmid, mouth_
             if abs(cc.z) < 0.15 and abs(e.Length - 2 * math.pi * bolt_r) < 0.15:
                 screw_e.append(e)
     if not cable_e:
-        mouth_pt = App.Vector(cable_center.x, cable_center.y, zmid)
         for e in solid.Edges:
-            if e.Length < 0.25 or e.Length > 2 * math.pi * CABLE_R + 0.35:
+            c = curve_of(e)
+            if c is None or type(c).__name__ != "Circle":
                 continue
-            for v in e.Vertexes:
-                if (v.Point - mouth_pt).Length < 1.25:
-                    cable_e.append(e)
-                    break
+            if abs(c.Radius - CABLE_R) > 0.05:
+                continue
+            cc = c.Center
+            if abs(cc.z - zmid) > 0.15:
+                continue
+            if (App.Vector(cc.x, cc.y, 0) - mouth_xy).Length > 1.5:
+                continue
+            cable_e.append(e)
     if not cable_e or len(screw_e) != 1:
         raise RuntimeError(f"lip edges cable={len(cable_e)} screw={len(screw_e)}")
-    cable_e.sort(key=lambda e: -e.Length)
-    solid = solid.makeFillet(LIP_R, [cable_e[0], screw_e[0]])
+    cable_e.sort(
+        key=lambda e: (App.Vector(e.Curve.Center.x, e.Curve.Center.y, 0) - mouth_xy).Length
+    )
+    try:
+        solid = solid.makeFillet(LIP_R, [cable_e[0], screw_e[0]])
+    except Exception:
+        solid = solid.makeFillet(LIP_R, screw_e)
+        solid = solid.makeFillet(LIP_R, [cable_e[0]])
     try:
         solid = solid.removeSplitter()
     except Exception:
@@ -251,6 +282,8 @@ def side_top_pinch(
     if verify:
         solid = lip_fillet(solid, bolt_r, zmid, outward)
         verify_cable_mouth(solid, zmid, outward, mouth)
+    elif mouth_override is not None and already_filleted:
+        solid = lip_fillet_drop(solid, mouth, bolt_r, zmid)
     else:
         solid = lip_fillet_by_center(
             solid,
@@ -393,27 +426,90 @@ def bean_wire(rx=7.0, ry=4.5):
     return Part.Ellipse(App.Vector(0, 0, 0), rx, ry).toShape()
 
 
+# Main teardrop bulge radius (plan); shoulder blends are tangent arcs of DROP_SHOULDER_R.
+DROP_MAIN_R = 6.0
+DROP_SHOULDER_R = 3.0
+DROP_TIP_R = 2.0
+DROP_TIP_Y = -5.0
+DROP_TIP_SPREAD = 0.45
+
+
+def _shoulder_fillet_center(R, sr, V, d, side):
+    """Center of a sr fillet tangent to main circle (R) and the side line through V."""
+    d = unit(d)
+    target = R - sr
+    best = None
+    for i in range(3600):
+        ang = math.radians(i / 10.0)
+        C = App.Vector(target * math.cos(ang), target * math.sin(ang), 0)
+        if C.y < 0.3:
+            continue
+        if side == "right" and C.x > V.x - 0.2:
+            continue
+        if side == "left" and C.x < V.x + 0.2:
+            continue
+        w = C - V
+        perp = w - d * (w.dot(d))
+        dd = abs(perp.Length - sr)
+        if best is None or dd < best[0]:
+            best = (dd, C)
+    if best is None or best[0] > 0.02:
+        raise RuntimeError(f"drop shoulder fillet failed ({side})")
+    return best[1]
+
+
+def _shoulder_fillet_points(R, sr, V, d, side):
+    C = _shoulder_fillet_center(R, sr, V, d, side)
+    Pc = unit(C) * R
+    d = unit(d)
+    w = C - V
+    t = w.dot(d)
+    h = (w - d * t).Length
+    off = math.sqrt(max(0.0, sr * sr - h * h))
+    Pl = V + d * max(0.0, t - off)
+    return Pc, Pl, C
+
+
+def _fillet_arc(center, radius, p_from, p_to):
+    circ = Part.Circle(center, App.Vector(0, 0, 1), radius)
+    a1 = math.atan2(p_from.y - center.y, p_from.x - center.x)
+    a2 = math.atan2(p_to.y - center.y, p_to.x - center.x)
+    return Part.ArcOfCircle(circ, a1, a2).toShape()
+
+
 def drop_wire():
-    """Teardrop: dome on +Y side of circle, blunt tip on -Y; cable enters +X."""
-    r = 6.0
-    tip_r = 2.0
-    tip_y = -5.0
-    t_side = 0.45
+    """Teardrop: dome on +Y, blunt tip on -Y; cable enters +X; round shoulder fillets."""
+    r = DROP_MAIN_R
+    sr = DROP_SHOULDER_R
+    tip_r = DROP_TIP_R
+    tip_y = DROP_TIP_Y
+    t_side = DROP_TIP_SPREAD
     tr = -math.pi / 2 + t_side
     tl = -math.pi / 2 - t_side
     pr = App.Vector(tip_r * math.cos(tr), tip_y + tip_r * math.sin(tr), 0)
     pl = App.Vector(tip_r * math.cos(tl), tip_y + tip_r * math.sin(tl), 0)
+    Vr = App.Vector(r, 0, 0)
+    Vl = App.Vector(-r, 0, 0)
+    Pcr, Plr, Cr = _shoulder_fillet_points(r, sr, Vr, pr - Vr, "right")
+    Pcl, Pll, Cl = _shoulder_fillet_points(r, sr, Vl, pl - Vl, "left")
     dome = Part.ArcOfCircle(
-        Part.Circle(App.Vector(0, 0, 0), App.Vector(0, 0, 1), r), 0, math.pi
+        Part.Circle(App.Vector(0, 0, 0), App.Vector(0, 0, 1), r),
+        math.atan2(Pcr.y, Pcr.x),
+        math.atan2(Pcl.y, Pcl.x),
     ).toShape()
-    right = Part.LineSegment(App.Vector(r, 0, 0), pr).toShape()
+    right = Part.LineSegment(pr, Plr).toShape()
+    left = Part.LineSegment(Pll, pl).toShape()
     tip = Part.ArcOfCircle(
         Part.Circle(App.Vector(0, tip_y, 0), App.Vector(0, 0, 1), tip_r), tl, tr
     ).toShape()
-    left = Part.LineSegment(pl, App.Vector(-r, 0, 0)).toShape()
-    wire = Part.Wire(Part.sortEdges([dome, right, tip, left])[0])
+    arc_r = _fillet_arc(Cr, sr, Plr, Pcr)
+    arc_l = _fillet_arc(Cl, sr, Pcl, Pll)
+    wire = Part.Wire([right, arc_r, dome, arc_l, left, tip])
     if not wire.isClosed():
         raise RuntimeError("drop outline not closed")
+    face = Part.Face(wire)
+    if not face.isValid():
+        raise RuntimeError("drop profile face invalid")
     return wire
 
 
@@ -590,6 +686,7 @@ if sheet:
         "BeanLength": "14 mm",
         "BeanWidth": "9 mm",
         "DropHeight": "12 mm",
+        "DropShoulderRadius": "3 mm",
         "SquircleSize": "12 mm",
         "SquircleTilt": "8 deg",
     }
