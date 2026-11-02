@@ -289,7 +289,7 @@ def side_top_pinch(
             solid = lip_fillet_drop(solid, mouth, bolt_r, zmid)
         else:
             solid = lip_fillet(solid, bolt_r, zmid, outward)
-        verify_cable_mouth(solid, zmid, outward, mouth, center_tol=1.0 if drop_cable_lip else 0.3)
+        verify_cable_mouth(solid, zmid, outward, mouth, center_tol=0.35 if drop_cable_lip else 0.3)
     elif mouth_override is not None and already_filleted:
         solid = lip_fillet_drop(solid, mouth, bolt_r, zmid)
     else:
@@ -487,6 +487,71 @@ def _fillet_arc(center, radius, p_from, p_to):
     return Part.ArcOfCircle(circ, a1, a2).toShape()
 
 
+def drop_pick_left_cable_face(solid, zmid, inset=MOUTH_INSET):
+    """Left blunt planar side face after outer fillet; axis normal to face, mouth inset for lip."""
+    inward_hint = drop_left_face_inward()
+    candidates = []
+    for face in solid.Faces:
+        if type(face.Surface).__name__ != "Plane":
+            continue
+        n = face.normalAt(0.5, 0.5)
+        if abs(n.z) > 0.08:
+            continue
+        inward = unit(App.Vector(-n.x, -n.y, -n.z))
+        if inward.dot(inward_hint) < 0.98:
+            continue
+        c = face.CenterOfMass
+        if c.x > -1.0 or c.y > -0.5:
+            continue
+        if face.Area < 12.0:
+            continue
+        candidates.append((face.Area, face, inward))
+    if not candidates:
+        raise RuntimeError("no drop left planar face for cable")
+    candidates.sort(key=lambda t: -t[0])
+    face, inward = candidates[0][1], candidates[0][2]
+    outward = inward * -1
+    _, _, face_mid = drop_left_face_geometry()
+    r = DROP_MAIN_R
+    sr = DROP_SHOULDER_R
+    tip_r = DROP_TIP_R
+    tip_y = DROP_TIP_Y
+    t_side = DROP_TIP_SPREAD
+    tl = -math.pi / 2 - t_side
+    pl = App.Vector(tip_r * math.cos(tl), tip_y + tip_r * math.sin(tl), 0)
+    Vl = App.Vector(-r, 0, 0)
+    _, Pll, _ = _shoulder_fillet_points(r, sr, Vl, pl - Vl, "left")
+    edge_to_tip = unit(pl - Pll)
+    probe = App.Vector(face_mid.x, face_mid.y, zmid) - edge_to_tip * 1.35
+    dist, pts, _ = face.distToShape(Part.Vertex(probe))
+    if not pts:
+        probe = App.Vector(face.CenterOfMass.x, face.CenterOfMass.y, zmid)
+        dist, pts, _ = face.distToShape(Part.Vertex(probe))
+    if not pts:
+        raise RuntimeError("cannot anchor cable mouth on drop left face")
+    outer = App.Vector(pts[0][0])
+    if abs(outer.z - zmid) > 0.15:
+        outer.z = zmid
+        dist, pts, _ = face.distToShape(Part.Vertex(outer))
+        if pts:
+            outer = App.Vector(pts[0][0])
+    mouth = outer + inward * inset
+    mouth.z = zmid
+    u = inward.cross(App.Vector(0, 0, 1))
+    if u.Length < 0.1:
+        u = App.Vector(0, 0, 1)
+    else:
+        u = unit(u)
+    v = unit(inward.cross(u))
+    for ang in (0, 45, 90, 135, 180, 225, 270, 315):
+        t = math.radians(ang)
+        rim = mouth + u * (CABLE_R * math.cos(t)) + v * (CABLE_R * math.sin(t))
+        d, _, _ = face.distToShape(Part.Vertex(rim))
+        if d > 0.22:
+            raise RuntimeError(f"drop cable circle clips face edge (d={d:.3f})")
+    return mouth, inward, outer
+
+
 def drop_left_face_geometry():
     """Blunt left side face: inward normal and a plan point on the face mid-height."""
     r = DROP_MAIN_R
@@ -511,17 +576,10 @@ def drop_left_face_inward():
     return inward
 
 
-def drop_left_mouth_on_solid(solid, zmid, inward, inset=MOUTH_INSET):
-    """Cable mouth centered on the left blunt face at zmid (inset after 1 mm outer fillet)."""
-    inward = unit(inward)
-    outward = inward * -1
-    _, outward, face_mid = drop_left_face_geometry()
-    # Lip land on the left flat: inset from the filleted outer skin along the face normal.
-    mouth_xy = face_mid + outward * (OUTER_R - inset)
-    mouth = App.Vector(mouth_xy.x, mouth_xy.y, zmid)
-    # Confirm the 2 mm circle fits inside material at mid-thickness.
+def drop_left_mouth_on_solid(solid, zmid, inward=None, inset=MOUTH_INSET):
+    """Cable mouth on measured left planar face (not profile estimate)."""
+    mouth, inward, _outer = drop_pick_left_cable_face(solid, zmid, inset)
     probe = mouth + inward * (CABLE_R + 0.05)
-    probe.z = zmid
     if not solid.isInside(probe, 1e-4, True):
         raise RuntimeError("drop left cable mouth not inside solid")
     return mouth
@@ -593,8 +651,7 @@ def build_drop(thick, bolt_r):
     solid = extrude_profile(wire, thick)
     solid = outer_fillet(solid, thick)
     zmid = -thick / 2.0
-    inward = drop_left_face_inward()
-    mouth = drop_left_mouth_on_solid(solid, zmid, inward)
+    mouth, inward, _outer = drop_pick_left_cable_face(solid, zmid)
     return side_top_pinch(
         solid,
         thick,
