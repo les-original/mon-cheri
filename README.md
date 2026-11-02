@@ -9,6 +9,10 @@
 - **barrel** - a puck-shaped
 - **square** - a square
 - **heart** - a classic heart
+- **hex** - a six-sided nut-like shape
+- **bean** - a horizontal oval
+- **drop** - a teardrop with a blunt tip
+- **squircle** - a rounded square with a slight tilt
 
 Each shape is provided in M3 and M4 sizes. 
 
@@ -20,10 +24,10 @@ Every `mon-cheri` should fit typical brake and shifter cables of all sorts.
 
 ### Recommended grub screw lengths
 
-| Style  | tri      | ball     | barrel   | heart    | square   |
-|--------|----------|----------|----------|----------|----------|
-| **M3** | 4 mm     | 5 mm     | 5 mm     | 4 mm     | 4 mm     |
-| **M4** | 5 - 6 mm | 3.5-4 mm | 3.5-4 mm | 5 - 6 mm | 5 - 6 mm |
+| Style  | tri      | ball     | barrel   | heart    | square   | hex      | bean     | drop     | squircle |
+|--------|----------|----------|----------|----------|----------|----------|----------|----------|----------|
+| **M3** | 4 mm     | 5 mm     | 5 mm     | 4 mm     | 4 mm     | 4 mm     | 5 mm     | 4 mm     | 4 mm     |
+| **M4** | 5 - 6 mm | 3.5-4 mm | 3.5-4 mm | 5 - 6 mm | 5 - 6 mm | 5 - 6 mm | 3.5-4 mm | 5 - 6 mm | 5 - 6 mm |
 
 
 ## Instructions
